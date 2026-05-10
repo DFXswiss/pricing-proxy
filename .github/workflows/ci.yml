@@ -1,0 +1,36 @@
+name: PR CI
+
+on:
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: pricing-proxy:pr
+          platforms: linux/arm64
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          docker run -d --name proxy -p 8080:8080 -e COINGECKO_API_KEY=dummy pricing-proxy:pr
+          # Give it a moment to bind
+          for i in $(seq 1 10); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8080/health
+          docker logs proxy
+          docker rm -f proxy

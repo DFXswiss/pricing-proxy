@@ -1,0 +1,58 @@
+name: Build and publish image
+
+on:
+  push:
+    branches: [main, develop]
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+env:
+  IMAGE: dfxswiss/pricing-proxy
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tags
+        id: tags
+        run: |
+          set -euo pipefail
+          REF="${GITHUB_REF}"
+          tags=""
+          case "$REF" in
+            refs/tags/v*.*.*)
+              VERSION="${REF#refs/tags/}"
+              tags="$IMAGE:$VERSION,$IMAGE:latest"
+              ;;
+            refs/heads/main)
+              tags="$IMAGE:latest"
+              ;;
+            refs/heads/develop)
+              tags="$IMAGE:beta"
+              ;;
+            *)
+              echo "Unsupported ref: $REF" >&2
+              exit 1
+              ;;
+          esac
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "Resolved tags: $tags"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          platforms: linux/arm64
