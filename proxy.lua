@@ -1,9 +1,19 @@
 -- Pricing-proxy request handler (CoinGecko only).
--- Caches upstream responses for at most 60s (project-wide hard limit) and
--- only after validating the body. A response that looks like an upstream
--- error must never be served as a valid price.
+-- Caches upstream responses after validating the body. A response that
+-- looks like an upstream error must never be served as a valid price.
+--
+-- TTL tiers:
+--   * /coins/{id}/history?date=...  — unbounded (date-pinned, immutable)
+--   * everything else               — 60s hard cap
 
-local CACHE_TTL = 60
+local CACHE_TTL_DEFAULT = 60
+
+-- /coins/{id}/history?date=DD-MM-YYYY returns a date-pinned snapshot that is
+-- immutable once the day is over. Cache those forever (TTL 0 = no expiry in
+-- lua_shared_dict; entries fall out only on container restart or LRU pressure
+-- on the 50m shared dict). Caveat: a /history?date=<today> request will pin
+-- the intraday snapshot until restart.
+local HISTORY_PATTERN = "^/api/v3/coins/[^/]+/history$"
 
 local upstream = ngx.var.proxy_upstream
 if upstream ~= "coingecko" then
@@ -100,7 +110,12 @@ if data.error then
     return unlock_and_fail(502, "coingecko error field present", res.status)
 end
 
-local ok, err = cache:set(cache_key, res.body, CACHE_TTL)
+local ttl = CACHE_TTL_DEFAULT
+if ngx.re.find(upstream_path, HISTORY_PATTERN, "jo") then
+    ttl = 0
+end
+
+local ok, err = cache:set(cache_key, res.body, ttl)
 if not ok then
     ngx.log(ngx.WARN, "pricing-proxy cache:set failed for ", cache_key, ": ", err)
 end
