@@ -49,6 +49,8 @@ Distributed as a versioned Docker image on Docker Hub:
   `.env`. Consumers never see it.
 - **60 s shared cache.** Concurrent identical requests collapse to one
   upstream call; subsequent hits within 60 s are served from memory.
+  `/coins/{id}/history?date=...` responses are cached without expiry
+  because they are date-pinned and immutable.
 - **Body validation before cache.** CoinGecko Pro returns HTTP 200 with an
   `error_message` envelope on quota exhaustion or bad parameters. Those
   responses are rejected with HTTP 502 and **never** cached as a valid
@@ -127,11 +129,20 @@ only one.
 
 ### Cache TTL
 
-- **60 s** for every CoinGecko response. This is the project-wide hard
-  cap — never raise it.
+Two tiers, picked by upstream path:
+
+| Path pattern | TTL | Rationale |
+|---|---|---|
+| `/api/v3/coins/{id}/history` | unbounded | Date-pinned daily snapshot, immutable once the day is over |
+| everything else | 60 s | Hard cap for live prices — never raise it |
+
 - Cache key: `coingecko:<path>?<query-string>`.
 - Storage: `lua_shared_dict pricing_cache 50m` (in-memory, lost on
-  restart).
+  restart). Unbounded entries are evicted only by LRU pressure on the
+  50 MB shared dict or by container restart.
+- Caveat for the unbounded tier: a `/history?date=<today>` request pins
+  the intraday snapshot until the container restarts. Reporting code
+  should query `/history` only for dates strictly in the past.
 
 ### Validation
 
@@ -154,7 +165,7 @@ next request triggers a fresh upstream call.
   garbage, the consumer gets HTTP 502 and decides for itself how to
   react (pause minting, retry, alert).
 - Cache an upstream error envelope.
-- Hold a value longer than the configured 60 s TTL.
+- Hold a non-`/history` value longer than the configured 60 s TTL.
 
 ## Building from source
 
