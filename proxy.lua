@@ -8,11 +8,16 @@
 
 local CACHE_TTL = 60
 
--- Adding a new upstream: every `api_key_var` declared here must also be
--- declared with `set $<var> '';` inside the matching `/_internal/<name>/`
--- block in pricing.conf. Without that `set`, ngx.location.capture's
--- `vars` injection silently no-ops and the upstream call goes out
--- without the key.
+-- Adding a new authenticated upstream means touching three files:
+--   1. UPSTREAMS map below — host + path_prefix + internal_location +
+--      api_key_env + api_key_var
+--   2. pricing.conf — `set $<api_key_var> '';` inside the matching
+--      `/_internal/<name>/` block, otherwise ngx.location.capture's
+--      `vars` injection silently no-ops
+--   3. nginx.conf — `env <api_key_env>;` so worker processes can read
+--      the variable via os.getenv at request time
+-- A free-tier upstream (GeckoTerminal) needs only steps 1 and 2 (no
+-- api_key_*), and its step 2 reduces to `set $upstream '';`.
 local UPSTREAMS = {
     coingecko = {
         host = "pro-api.coingecko.com",

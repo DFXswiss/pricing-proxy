@@ -174,8 +174,11 @@ A response is cached only when all of the following are true:
 - HTTP status is `200`
 - Body parses as JSON
 - Body is a JSON object or array
-- No top-level field whose name starts with `error` is present (catches
-  CoinGecko's `error` / `error_message` and GeckoTerminal's `errors`)
+- No top-level field whose name starts with `error` carries a truthy
+  value (catches CoinGecko's `error` / `error_message` and
+  GeckoTerminal's `errors`; an empty array, empty string, `0`, or
+  `false` does not trip the check, so upstreams that ship a benign
+  diagnostic counter alongside a successful payload still cache)
 - No nested `status.error_message` envelope (CoinGecko Pro's
   quota-exhausted / bad-params shape)
 
