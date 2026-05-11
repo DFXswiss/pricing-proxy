@@ -8,6 +8,11 @@
 
 local CACHE_TTL = 60
 
+-- Adding a new upstream: every `api_key_var` declared here must also be
+-- declared with `set $<var> '';` inside the matching `/_internal/<name>/`
+-- block in pricing.conf. Without that `set`, ngx.location.capture's
+-- `vars` injection silently no-ops and the upstream call goes out
+-- without the key.
 local UPSTREAMS = {
     coingecko = {
         host = "pro-api.coingecko.com",
@@ -111,13 +116,22 @@ if type(data) ~= "table" then
     return unlock_and_fail(502, "non-object body", res.status)
 end
 
--- Reject any top-level field whose name starts with "error". CoinGecko Pro
--- returns HTTP 200 with an `error_message` envelope on quota exhaustion or
--- bad params; GeckoTerminal wraps failures in an `errors` array. The
--- wildcard catches both without per-upstream conditionals.
-for k, _ in pairs(data) do
+-- Reject any top-level field whose name starts with "error" *and* carries a
+-- truthy value. CoinGecko Pro returns HTTP 200 with an `error_message`
+-- envelope on quota exhaustion or bad params; GeckoTerminal wraps failures
+-- in an `errors` array. Gating on the value (not just presence) avoids a
+-- false reject if an upstream ever ships a legitimate `errors: []` or
+-- `error_count: 0` diagnostic alongside a successful payload.
+for k, v in pairs(data) do
     if type(k) == "string" and k:sub(1, 5) == "error" then
-        return unlock_and_fail(502, "top-level " .. k .. " field present", res.status)
+        local tripped =
+            (type(v) == "table"   and next(v) ~= nil) or
+            (type(v) == "string"  and v ~= "")        or
+            (type(v) == "number"  and v ~= 0)         or
+            (type(v) == "boolean" and v)
+        if tripped then
+            return unlock_and_fail(502, "top-level " .. k .. " field present", res.status)
+        end
     end
 end
 
