@@ -101,7 +101,7 @@ end
 local data = cjson.decode(res.body or "")
 if data == nil then
     local snippet = (res.body or ""):sub(1, 200):gsub("\n", " ")
-    ngx.log(ngx.WARN, "pricing-proxy non-JSON body ", cache_key,
+    ngx.log(ngx.WARN, "pricing-proxy non-JSON body ", upstream_name, " ", cache_key,
         " upstream_status=", tostring(res.status),
         " body_len=", tostring(#(res.body or "")),
         " body[0..200]=", snippet)

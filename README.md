@@ -176,7 +176,8 @@ A response is cached only when all of the following are true:
 - Body is a JSON object or array
 - No top-level field whose name starts with `error` is present (catches
   CoinGecko's `error` / `error_message` and GeckoTerminal's `errors`)
-- For CoinGecko: no `status.error_message` envelope
+- No nested `status.error_message` envelope (CoinGecko Pro's
+  quota-exhausted / bad-params shape)
 
 Any failed check → the consumer receives HTTP 502 with a JSON body
 describing the rejection, and the cache stays empty for that key so the
