@@ -59,10 +59,10 @@ Distributed as a versioned Docker image on Docker Hub:
 - **60 s shared cache.** Concurrent identical requests collapse to one
   upstream call; subsequent hits within 60 s are served from memory.
 - **Body validation before cache.** CoinGecko Pro returns HTTP 200 with
-  an `error_message` envelope on quota exhaustion or bad parameters, and
-  GeckoTerminal wraps failures in an `errors` array. Any top-level field
-  whose name starts with `error` rejects the response with HTTP 502 —
-  **never** cached as a valid price.
+  an `error_message` envelope on quota exhaustion or bad parameters;
+  GeckoTerminal wraps failures in an `errors` array. Any top-level
+  `error*` field carrying a truthy value rejects the response with HTTP
+  502 — **never** cached as a valid price.
 - **Request coalescing.** Per cache key, only one request reaches the
   upstream even under burst; the others wait up to 5 s for the
   freshly-populated cache. Especially valuable for GeckoTerminal, whose
