@@ -12,6 +12,8 @@ env:
 jobs:
   build-and-push:
     runs-on: ubuntu-24.04-arm
+    outputs:
+      ref_kind: ${{ steps.tags.outputs.ref_kind }}
     steps:
       - uses: actions/checkout@v4
 
@@ -21,16 +23,20 @@ jobs:
           set -euo pipefail
           REF="${GITHUB_REF}"
           tags=""
+          ref_kind=""
           case "$REF" in
             refs/tags/v*.*.*)
               VERSION="${REF#refs/tags/}"
               tags="$IMAGE:$VERSION,$IMAGE:latest"
+              ref_kind="tag"
               ;;
             refs/heads/main)
               tags="$IMAGE:latest"
+              ref_kind="main"
               ;;
             refs/heads/develop)
               tags="$IMAGE:beta"
+              ref_kind="develop"
               ;;
             *)
               echo "Unsupported ref: $REF" >&2
@@ -38,7 +44,8 @@ jobs:
               ;;
           esac
           echo "tags=$tags" >> "$GITHUB_OUTPUT"
-          echo "Resolved tags: $tags"
+          echo "ref_kind=$ref_kind" >> "$GITHUB_OUTPUT"
+          echo "Resolved tags: $tags (ref_kind=$ref_kind)"
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
@@ -56,3 +63,48 @@ jobs:
           push: true
           tags: ${{ steps.tags.outputs.tags }}
           platforms: linux/arm64
+
+  deploy-dev:
+    needs: build-and-push
+    if: needs.build-and-push.outputs.ref_kind == 'develop'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Install cloudflared
+        run: |
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/download/2025.4.0/cloudflared-linux-arm64 -o /usr/local/bin/cloudflared
+          chmod +x /usr/local/bin/cloudflared
+
+      - name: Deploy to dfxdev
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_DEV_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "${{ secrets.DEPLOY_DEV_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/deploy_key \
+            -o ProxyCommand="cloudflared access ssh --hostname ${{ secrets.DEPLOY_DEV_HOST }}" \
+            ${{ secrets.DEPLOY_DEV_USER }}@${{ secrets.DEPLOY_DEV_HOST }} \
+            "pricing-proxy"
+
+  deploy-prd:
+    needs: build-and-push
+    # Deploy to PRD only on main pushes — tag pushes already trigger a main
+    # push for the same commit, and deploying twice would re-pull the same
+    # `:latest` image during the second run.
+    if: needs.build-and-push.outputs.ref_kind == 'main'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Install cloudflared
+        run: |
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/download/2025.4.0/cloudflared-linux-arm64 -o /usr/local/bin/cloudflared
+          chmod +x /usr/local/bin/cloudflared
+
+      - name: Deploy to dfxprd
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_PRD_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "${{ secrets.DEPLOY_PRD_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/deploy_key \
+            -o ProxyCommand="cloudflared access ssh --hostname ${{ secrets.DEPLOY_PRD_HOST }}" \
+            ${{ secrets.DEPLOY_PRD_USER }}@${{ secrets.DEPLOY_PRD_HOST }} \
+            "pricing-proxy"
