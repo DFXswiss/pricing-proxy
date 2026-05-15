@@ -195,6 +195,101 @@ next request triggers a fresh upstream call.
 - Cache an upstream error envelope.
 - Hold a value longer than the configured 60 s TTL.
 
+## Quota monitoring
+
+The proxy ships with a background monitor that polls CoinGecko's
+`/api/v3/key` endpoint at a fixed cadence and pushes Telegram alerts
+when the monthly credit drops below configured thresholds. This lets
+the proxy — the single component that owns the upstream key — own its
+own alerting, instead of bolting quota checks onto each consumer.
+
+### How it works
+
+`monitor.lua` runs as an `ngx.timer.every` task on worker 0 only, so a
+multi-worker deployment still emits exactly one probe per cycle. Each
+cycle:
+
+1. Issues an internal subrequest to `/_internal/coingecko/api/v3/key`
+   so the same key plumbing, runtime resolver, and gzip stripping that
+   serve consumer traffic also handle the probe.
+2. Extracts `monthly_call_credit`, `current_total_monthly_calls`, and
+   `current_remaining_monthly_calls` from the response.
+3. Compares the used percentage against two thresholds and, if a
+   threshold is crossed and the per-threshold dedup window has expired,
+   POSTs a Markdown-formatted message to Telegram via
+   `/_internal/telegram_send` (token kept in env, never in the URL or
+   logs).
+4. Writes the latest percentage into the `monitor_state` shared dict so
+   `/quota` can expose it and so a drop back below the warn threshold
+   triggers a single recovery notification.
+
+### Thresholds
+
+| Level | Used credit | Behaviour |
+|---|---|---|
+| ✅ Healthy | < 80% | No alert. A recovery message is sent once when crossing back below 80%. |
+| ⚠️ Warning | ≥ 80% | Telegram warning, then deduped for 24 h. |
+| 🚨 Critical | ≥ 95% | Telegram critical, then deduped for 24 h. |
+
+Constants live at the top of `monitor.lua`
+(`CHECK_INTERVAL_S`, `WARN_THRESHOLD_PCT`, `CRIT_THRESHOLD_PCT`,
+`ALERT_DEDUPE_S`, `STARTUP_DELAY_S`). Change them there if the operating
+profile shifts — the values are intentionally constants rather than env
+vars because they describe the alert contract, not per-deployment
+configuration.
+
+### Enabling alerts
+
+Set both env vars in your `.env`. Either one missing → the proxy still
+runs and still probes (the result lands in the log every 30 min), but
+no Telegram messages are sent.
+
+```bash
+TELEGRAM_BOT_TOKEN=123456:ABC-DEF…
+TELEGRAM_CHAT_ID=948932168
+```
+
+To find the chat id, message your bot once (`/start`) and read it from
+`https://api.telegram.org/bot<TOKEN>/getUpdates`.
+
+### Disabling alerts
+
+Leave `TELEGRAM_BOT_TOKEN` or `TELEGRAM_CHAT_ID` empty (the default in
+`.env.example`). The background monitor still runs and logs every cycle
+so operators can spot trends in `docker logs`, but no message is sent.
+
+### `/quota` endpoint
+
+`GET /quota` returns the last percentage the monitor observed:
+
+```bash
+$ curl -s http://localhost:8080/quota
+{"last_pct":12.3}
+```
+
+This is **not** a live probe — it serves whatever the background task
+last wrote into the shared dict, so the value is at most
+`CHECK_INTERVAL_S` old and may be missing entirely for the first
+`STARTUP_DELAY_S` after a restart. Use it for dashboards and
+human-readable checks; do not script retry/backoff against it.
+
+### Operational notes
+
+- **Worker affinity.** The timer is fenced to `ngx.worker.id() == 0` so
+  alerting does not multiply with `worker_processes`. If you ever turn
+  `worker_processes` to `1` or move to a single-process runtime this
+  fence still does the right thing.
+- **State is in memory.** The `monitor_state` shared dict resets on a
+  container restart, which means the dedup window resets too. That is
+  acceptable: the next probe within `CHECK_INTERVAL_S` will re-alert if
+  the condition still holds.
+- **No Telegram from the request path.** Only the timer touches
+  Telegram. Consumer requests never block on Telegram availability.
+- **Token never logged.** `access_log off` on
+  `/_internal/telegram_send` keeps the bot token out of access logs;
+  the token is also passed via per-request `vars`, never templated into
+  config.
+
 ## Building from source
 
 The Docker image is the supported distribution; building locally is only
@@ -209,21 +304,25 @@ docker run -d -p 8080:8080 -e COINGECKO_API_KEY=$YOUR_KEY pricing-proxy:dev
 
 | File | Purpose |
 |---|---|
-| `nginx.conf` | OpenResty top-level config: shared dicts, resolver with `ipv6=off`, env var pass-through |
-| `pricing.conf` | Server block: public `/coingecko/` and `/geckoterminal/` locations and their internal `/_internal/<upstream>/` `proxy_pass` targets |
+| `nginx.conf` | OpenResty top-level config: shared dicts, resolver with `ipv6=off`, env var pass-through, monitor bootstrap |
+| `pricing.conf` | Server block: public `/coingecko/`, `/geckoterminal/`, `/health`, `/quota` locations and their internal `/_internal/<upstream>/` and `/_internal/telegram_send` `proxy_pass` targets |
 | `proxy.lua` | Request handler: upstream config lookup → cache lookup → coalescing lock → subrequest → JSON validation → cache store |
-| `Dockerfile` | Bakes the three configs into the OpenResty base image |
+| `monitor.lua` | Background quota monitor: timer → `/api/v3/key` probe → threshold check → Telegram alert |
+| `Dockerfile` | Bakes the configs and Lua files into the OpenResty base image |
 | `docker-compose.yaml` | Reference deployment using the published image |
-| `.env.example` | Only secret is `COINGECKO_API_KEY` |
+| `.env.example` | `COINGECKO_API_KEY` plus optional `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` for alerts |
 
 ## Debugging
 
 | What | How |
 |---|---|
 | Health | `curl http://localhost:8080/health` → `OK` |
+| Last quota snapshot | `curl http://localhost:8080/quota` → `{"last_pct":12.3}` (cached, not a live probe) |
 | Logs | `docker logs pricing-proxy` — every request is logged with `cache=HIT\|MISS` |
 | Rejected upstream responses | Look for `pricing-proxy reject <upstream> ...` warnings in the logs |
 | Non-JSON upstream body | A `pricing-proxy non-JSON body ... body[0..200]=...` warning includes a snippet so you can see what the upstream actually returned (HTML challenge, gzip, etc.) |
+| Quota monitor cycle | A `monitor: quota <plan> used=X/Y (Z%) remaining=…` NOTICE is logged every `CHECK_INTERVAL_S` (default 30 min) |
+| Quota monitor errors | `monitor: telegram send failed …` or `monitor: quota probe …` warnings indicate alerting/probe problems |
 | Cache state | Restart the container — cache is in-memory and clears on restart |
 
 ## License
