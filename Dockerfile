@@ -6,6 +6,8 @@ COPY nginx.conf   /usr/local/openresty/nginx/conf/nginx.conf
 COPY pricing.conf /etc/nginx/conf.d/default.conf
 # request handler: cache → coalescing lock → upstream → JSON validate → cache store
 COPY proxy.lua    /etc/nginx/lua/proxy.lua
+# background quota monitor: periodic /api/v3/key probe → Telegram alerting
+COPY monitor.lua  /etc/nginx/lua/monitor.lua
 
 EXPOSE 8080
 
