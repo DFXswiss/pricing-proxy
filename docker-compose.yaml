@@ -7,6 +7,8 @@ services:
       - "8080:8080"
     environment:
       COINGECKO_API_KEY: ${COINGECKO_API_KEY}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "--timeout=3", "http://127.0.0.1:8080/health"]
       interval: 10s
