@@ -205,38 +205,64 @@ own alerting, instead of bolting quota checks onto each consumer.
 
 ### How it works
 
-`monitor.lua` runs as an `ngx.timer.every` task on worker 0 only, so a
-multi-worker deployment still emits exactly one probe per cycle. Each
-cycle:
+`monitor.lua` schedules an `ngx.timer.every` task on worker 0 only, so
+a multi-worker deployment still emits exactly one probe per cycle.
+
+OpenResty does **not** allow `ngx.location.capture` from inside a timer
+callback, so the timer cannot do the upstream work itself. Instead the
+timer issues a loopback TCP `GET` to `/_internal/quota_probe`, which is
+a normal request location (firewalled to `127.0.0.1` so external
+callers cannot trigger alerts). Its `content_by_lua_block` calls
+`monitor.run_check()` in a real request context, where subrequests
+work, and the actual probe-and-alert pipeline runs:
 
 1. Issues an internal subrequest to `/_internal/coingecko/api/v3/key`
    so the same key plumbing, runtime resolver, and gzip stripping that
-   serve consumer traffic also handle the probe.
+   serve consumer traffic also handle the probe. This bypasses the
+   public `/coingecko/` location on purpose, so a probe response never
+   lands in the 60 s response cache and can never be served as a
+   consumer price.
 2. Extracts `monthly_call_credit`, `current_total_monthly_calls`, and
    `current_remaining_monthly_calls` from the response.
 3. Compares the used percentage against two thresholds and, if a
    threshold is crossed and the per-threshold dedup window has expired,
    POSTs a Markdown-formatted message to Telegram via
-   `/_internal/telegram_send` (token kept in env, never in the URL or
-   logs).
+   `/_internal/telegram_send` (token kept in env, passed per request
+   via `ngx.location.capture`'s `vars`, never in the URL or logs).
 4. Writes the latest percentage into the `monitor_state` shared dict so
    `/quota` can expose it and so a drop back below the warn threshold
    triggers a single recovery notification.
 
-### Thresholds
+### Thresholds and state transitions
 
-| Level | Used credit | Behaviour |
-|---|---|---|
-| ✅ Healthy | < 80% | No alert. A recovery message is sent once when crossing back below 80%. |
-| ⚠️ Warning | ≥ 80% | Telegram warning, then deduped for 24 h. |
-| 🚨 Critical | ≥ 95% | Telegram critical, then deduped for 24 h. |
+The monitor classifies each probe into one of three levels:
+
+| Level | Used credit |
+|---|---|
+| ✅ Healthy | < 80% |
+| ⚠️ Warning | ≥ 80% |
+| 🚨 Critical | ≥ 95% |
+
+Telegram messages are emitted:
+
+- **On every escalation** (healthy → warn, healthy → crit, warn → crit).
+- **On every de-escalation** (crit → warn re-sends the warn alert so the
+  operator still sees the system is non-healthy; warn|crit → healthy
+  sends a single recovery message).
+- **Periodically while non-healthy** — once every `REALERT_INTERVAL_S`
+  (default 24 h) at the current level, so a persistent over-quota
+  condition keeps surfacing without spamming inside the window.
+
+If a Telegram send fails, the new state is **not** persisted, so the
+next probe inside `CHECK_INTERVAL_S` will retry. This means a transient
+Telegram outage will not silently swallow an alert.
 
 Constants live at the top of `monitor.lua`
 (`CHECK_INTERVAL_S`, `WARN_THRESHOLD_PCT`, `CRIT_THRESHOLD_PCT`,
-`ALERT_DEDUPE_S`, `STARTUP_DELAY_S`). Change them there if the operating
-profile shifts — the values are intentionally constants rather than env
-vars because they describe the alert contract, not per-deployment
-configuration.
+`REALERT_INTERVAL_S`, `STARTUP_DELAY_S`). Change them there if the
+operating profile shifts — the values are intentionally constants
+rather than env vars because they describe the alert contract, not
+per-deployment configuration.
 
 ### Enabling alerts
 
@@ -260,12 +286,18 @@ so operators can spot trends in `docker logs`, but no message is sent.
 
 ### `/quota` endpoint
 
-`GET /quota` returns the last percentage the monitor observed:
+`GET /quota` returns a snapshot of what the monitor last observed:
 
 ```bash
 $ curl -s http://localhost:8080/quota
-{"last_pct":12.3}
+{"last_pct":12.3,"last_level":0,"last_alert_ts":1716120000}
 ```
+
+Fields:
+- `last_pct` — percentage of monthly credit used at the last probe.
+- `last_level` — `0` healthy, `1` warning, `2` critical.
+- `last_alert_ts` — Unix time of the last successfully sent Telegram
+  message (omitted if no alert has fired since startup).
 
 This is **not** a live probe — it serves whatever the background task
 last wrote into the shared dict, so the value is at most
@@ -280,9 +312,9 @@ human-readable checks; do not script retry/backoff against it.
   `worker_processes` to `1` or move to a single-process runtime this
   fence still does the right thing.
 - **State is in memory.** The `monitor_state` shared dict resets on a
-  container restart, which means the dedup window resets too. That is
-  acceptable: the next probe within `CHECK_INTERVAL_S` will re-alert if
-  the condition still holds.
+  container restart, which means the level history resets too. That is
+  acceptable: the next probe within `CHECK_INTERVAL_S` will derive the
+  level from scratch and alert if the condition still holds.
 - **No Telegram from the request path.** Only the timer touches
   Telegram. Consumer requests never block on Telegram availability.
 - **Token never logged.** `access_log off` on
