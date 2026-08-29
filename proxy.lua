@@ -48,6 +48,51 @@ local upstream_path = ngx.re.sub(ngx.var.uri, upstream_cfg.path_prefix, "/", "jo
 local args = ngx.var.args or ""
 local cache_key = upstream_name .. ":" .. upstream_path .. "?" .. args
 
+-- CoinGecko's `usd` coin id is not the US dollar; consumers treating it as FX
+-- would get a dust token, so substitute USDT (`tether`) and remap the response key.
+local capture_args = args
+local aliased_usd = false
+local requested_tether = false
+if upstream_name == "coingecko"
+    and upstream_path == "/api/v3/simple/price"
+    and args ~= ""
+then
+    local decoded = ngx.decode_args(args)
+    local ids_raw = decoded and decoded.ids
+    if type(ids_raw) == "table" then
+        ids_raw = table.concat(ids_raw, ",")
+    end
+    if type(ids_raw) == "string" and ids_raw ~= "" then
+        local parts = {}
+        local seen_tether = false
+        for token in ids_raw:gmatch("[^,]+") do
+            local t = token:match("^%s*(.-)%s*$")
+            if t and t ~= "" then
+                local lower = string.lower(t)
+                if lower == "usd" then
+                    aliased_usd = true
+                    if not seen_tether then
+                        parts[#parts + 1] = "tether"
+                        seen_tether = true
+                    end
+                elseif lower == "tether" then
+                    requested_tether = true
+                    if not seen_tether then
+                        parts[#parts + 1] = t
+                        seen_tether = true
+                    end
+                else
+                    parts[#parts + 1] = t
+                end
+            end
+        end
+        if aliased_usd then
+            decoded.ids = table.concat(parts, ",")
+            capture_args = ngx.encode_args(decoded)
+        end
+    end
+end
+
 local function send(status, cache_status, body)
     ngx.status = status
     ngx.header["Content-Type"] = "application/json"
@@ -100,7 +145,7 @@ if upstream_cfg.api_key_var then
 end
 
 local res = ngx.location.capture(upstream_cfg.internal_location .. upstream_path, {
-    args = args,
+    args = capture_args,
     vars = capture_vars,
 })
 
@@ -146,10 +191,19 @@ if type(data.status) == "table" and data.status.error_message then
     return unlock_and_fail(502, "status.error_message: " .. tostring(data.status.error_message), res.status)
 end
 
-local ok, err = cache:set(cache_key, res.body, CACHE_TTL)
+local body = res.body
+if aliased_usd and type(data.tether) == "table" then
+    data.usd = data.tether
+    if not requested_tether then
+        data.tether = nil
+    end
+    body = cjson.encode(data)
+end
+
+local ok, err = cache:set(cache_key, body, CACHE_TTL)
 if not ok then
     ngx.log(ngx.WARN, "pricing-proxy cache:set failed for ", cache_key, ": ", err)
 end
 if lock then lock:unlock() end
 
-send(200, "MISS", res.body)
+send(200, "MISS", body)

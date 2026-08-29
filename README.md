@@ -186,6 +186,28 @@ Any failed check → the consumer receives HTTP 502 with a JSON body
 describing the rejection, and the cache stays empty for that key so the
 next request triggers a fresh upstream call.
 
+### CoinGecko id alias
+
+On CoinGecko `/api/v3/simple/price` only, the proxy deliberately rewrites
+one coin id. CoinGecko's `usd` id is not the US dollar — it is a dust
+token — so consumers that ask for `ids=usd` as an FX rate would otherwise
+cache a near-zero price. The proxy substitutes USDT instead:
+
+- Whole-token, case-insensitive match: `usd` / `USD` in the `ids` list
+  is fetched as `tether`. Comma-separated lists are rewritten in place
+  (`ids=usd,bitcoin` → `ids=tether,bitcoin`).
+- `usd-coin` (USDC) and other ids that merely contain `usd` are **not**
+  rewritten.
+- `vs_currencies=usd` is **not** rewritten.
+- The JSON response key remains `usd`: the upstream `tether` object is
+  remapped so existing `response.usd.eur` readers keep working. If the
+  client also requested `tether`, both keys are present.
+- The cache key is the **original** client query string (`ids=usd…`), so
+  identical follow-up requests HIT the already-aliased body.
+- Other CoinGecko paths and all of GeckoTerminal are untouched.
+
+This is the one place the proxy is not fully transparent.
+
 ### What it never does
 
 - Serve a stale value when an upstream is down. There is no
