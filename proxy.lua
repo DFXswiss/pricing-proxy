@@ -192,7 +192,10 @@ if type(data.status) == "table" and data.status.error_message then
 end
 
 local body = res.body
-if aliased_usd and type(data.tether) == "table" then
+if aliased_usd then
+    if type(data.tether) ~= "table" then
+        return unlock_and_fail(502, "aliased usd: upstream tether object missing", res.status)
+    end
     data.usd = data.tether
     if not requested_tether then
         data.tether = nil

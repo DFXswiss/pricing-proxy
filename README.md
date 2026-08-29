@@ -202,6 +202,9 @@ cache a near-zero price. The proxy substitutes USDT instead:
 - The JSON response key remains `usd`: the upstream `tether` object is
   remapped so existing `response.usd.eur` readers keep working. If the
   client also requested `tether`, both keys are present.
+- If the upstream body has no `tether` object after the alias rewrite,
+  the proxy returns 502 and does not cache (so HITs never serve a body
+  without `usd`).
 - The cache key is the **original** client query string (`ids=usd…`), so
   identical follow-up requests HIT the already-aliased body.
 - Other CoinGecko paths and all of GeckoTerminal are untouched.
