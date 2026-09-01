@@ -171,9 +171,10 @@ but not the only one.
   upstream subrequest is not HTTP 200 because of a transient failure
   (connect/read timeout, HTTP 408/429/5xx, or capture status 0/502/504),
   that body is served as HTTP 200 with `X-Cache-Status: STALE` instead
-  of 502. Coalesced waiters that find no fresh key after the lock try
-  the same stale key before another upstream attempt. Serving STALE
-  does **not** refresh the fresh 60 s key.
+  of 502. Coalesced waiters that find no fresh key after the lock go
+  to upstream like the leader; STALE is only on a proven transient
+  capture status. Serving STALE does **not** refresh the fresh 60 s
+  key.
 - Cache key: `<upstream>:<path>?<query-string>` (e.g.
   `coingecko:/api/v3/...`, `geckoterminal:/api/v2/...`). The stale key
   is `stale:` plus the same string (including the original client query

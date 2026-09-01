@@ -140,11 +140,6 @@ if elapsed and elapsed > 0 then
         send(200, "HIT", cached)
         return
     end
-    -- No fresh after the lock: try last validated body before falling
-    -- through to another upstream attempt / eventual 502.
-    if try_serve_stale("lock-wait") then
-        return
-    end
 end
 
 local function unlock_and_fail(status, detail, upstream_status)
