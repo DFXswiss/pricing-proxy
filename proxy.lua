@@ -1,12 +1,15 @@
 -- Pricing-proxy request handler.
 --
 -- Selects a per-route upstream config (host, optional API key, internal
--- subrequest location), caches upstream responses for at most 60s
--- (project-wide hard limit), and only caches after validating the body.
--- A response that looks like an upstream error must never be served as
+-- subrequest location), caches validated upstream responses for 60s
+-- (fresh; project-wide hard cap) and remembers the last validated body
+-- for 15 minutes (stale). On transient upstream failure, serves that
+-- remembered body as HTTP 200 with X-Cache-Status: STALE. A response
+-- that looks like an upstream error must never be cached or served as
 -- a valid price.
 
 local CACHE_TTL = 60
+local STALE_TTL = 900  -- 15 minutes
 
 -- Adding a new authenticated upstream means touching three files:
 --   1. UPSTREAMS map below — host + path_prefix + internal_location +
@@ -100,6 +103,11 @@ local function send(status, cache_status, body)
     ngx.print(body)
 end
 
+local function is_transient_upstream(status)
+    status = tonumber(status) or 0
+    return status == 0 or status == 408 or status == 429 or status >= 500
+end
+
 local cached = cache:get(cache_key)
 if cached then
     send(200, "HIT", cached)
@@ -111,6 +119,19 @@ local resty_lock = require "resty.lock"
 local lock = resty_lock:new("pricing_locks", { timeout = 5, exptime = 10 })
 local elapsed
 if lock then elapsed = lock:lock(cache_key) end
+
+-- Last validated body only; does not refresh the fresh 60s key.
+local function try_serve_stale(upstream_status)
+    local stale = cache:get("stale:" .. cache_key)
+    if type(stale) == "string" and stale ~= "" then
+        if lock then lock:unlock() end
+        ngx.log(ngx.WARN, "pricing-proxy serving STALE ", upstream_name, " ", cache_key,
+            " upstream_status=", tostring(upstream_status))
+        send(200, "STALE", stale)
+        return true
+    end
+    return false
+end
 
 if elapsed and elapsed > 0 then
     cached = cache:get(cache_key)
@@ -150,6 +171,11 @@ local res = ngx.location.capture(upstream_cfg.internal_location .. upstream_path
 })
 
 if res.status ~= 200 then
+    if is_transient_upstream(res.status) then
+        if try_serve_stale(res.status) then
+            return
+        end
+    end
     return unlock_and_fail(502, "upstream HTTP " .. tostring(res.status), res.status)
 end
 
@@ -206,6 +232,10 @@ end
 local ok, err = cache:set(cache_key, body, CACHE_TTL)
 if not ok then
     ngx.log(ngx.WARN, "pricing-proxy cache:set failed for ", cache_key, ": ", err)
+end
+local stale_ok, stale_err = cache:set("stale:" .. cache_key, body, STALE_TTL)
+if not stale_ok then
+    ngx.log(ngx.WARN, "pricing-proxy stale cache:set failed for ", cache_key, ": ", stale_err)
 end
 if lock then lock:unlock() end
 
