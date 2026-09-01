@@ -3,8 +3,8 @@
 Small caching reverse-proxy in front of the **CoinGecko Pro API** and
 **GeckoTerminal API**. Holds the CoinGecko upstream key in a single place,
 validates upstream error envelopes before caching, and coalesces
-concurrent identical requests so one cache miss cannot stampede the
-upstream.
+concurrent identical requests while the leader is filling the fresh
+cache so a burst cannot stampede the upstream on a successful miss.
 
 Designed for the DFX.swiss service stack but useful for anyone who runs
 several backends against CoinGecko Pro or GeckoTerminal from one host:
@@ -58,8 +58,10 @@ Distributed as a versioned Docker image on Docker Hub:
   `.env`. Consumers never see it. (GeckoTerminal is free-tier only and
   needs no key.)
 - **60 s fresh cache + 15 m stale window.** Concurrent identical
-  requests collapse to one upstream call; subsequent hits within 60 s
-  are served from memory (`X-Cache-Status: HIT`). On transient upstream
+  requests collapse to one upstream call when the leader fills the
+  fresh key; subsequent hits within 60 s are served from memory
+  (`X-Cache-Status: HIT`). If the leader does not fill that key,
+  waiters proceed to upstream themselves. On transient upstream
   failure only, the last validated body may be served for up to
   15 minutes as `X-Cache-Status: STALE`.
 - **Body validation before cache.** CoinGecko Pro returns HTTP 200 with
@@ -67,9 +69,10 @@ Distributed as a versioned Docker image on Docker Hub:
   GeckoTerminal wraps failures in an `errors` array. Any top-level
   `error*` field carrying a truthy value rejects the response with HTTP
   502 — **never** cached as a valid price.
-- **Request coalescing.** Per cache key, only one request reaches the
-  upstream even under burst; the others wait up to 5 s for the
-  freshly-populated cache. Especially valuable for GeckoTerminal, whose
+- **Request coalescing.** Per cache key, waiters block up to 5 s on the
+  lock while the leader populates the fresh cache. If that write
+  happens, they take `HIT` and do not hit upstream. If it does not,
+  they capture themselves. Especially valuable for GeckoTerminal, whose
   free-tier 30 req/min quota is shared across the whole host IP.
 - **IPv4 only.** The runtime resolver filters AAAA records so the proxy
   cannot pick an IPv6 Cloudflare endpoint that the host network can't
