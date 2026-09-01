@@ -40,7 +40,8 @@ Distributed as a versioned Docker image on Docker Hub:
 │        │  pricing-proxy   │                      │
 │        │   (OpenResty)    │                      │
 │        │                  │                      │
-│        │  · cache (60 s)  │                      │
+│        │  · cache (60 s + │                      │
+│        │    15 m stale)   │                      │
 │        │  · key inject    │                      │
 │        │  · body validate │                      │
 │        │  · coalescing    │                      │
@@ -56,8 +57,11 @@ Distributed as a versioned Docker image on Docker Hub:
 - **Single API key.** The CoinGecko Pro key is set once in the proxy's
   `.env`. Consumers never see it. (GeckoTerminal is free-tier only and
   needs no key.)
-- **60 s shared cache.** Concurrent identical requests collapse to one
-  upstream call; subsequent hits within 60 s are served from memory.
+- **60 s fresh cache + 15 m stale window.** Concurrent identical
+  requests collapse to one upstream call; subsequent hits within 60 s
+  are served from memory (`X-Cache-Status: HIT`). On transient upstream
+  failure only, the last validated body may be served for up to
+  15 minutes as `X-Cache-Status: STALE`.
 - **Body validation before cache.** CoinGecko Pro returns HTTP 200 with
   an `error_message` envelope on quota exhaustion or bad parameters;
   GeckoTerminal wraps failures in an `errors` array. Any top-level
@@ -160,12 +164,23 @@ but not the only one.
 
 ### Cache TTL
 
-- **60 s** for every upstream response. This is the project-wide hard
-  cap — never raise it.
+- **Fresh: 60 s** for every validated upstream response. This is the
+  project-wide hard cap on the fresh key — never raise it.
+- **Stale: 15 minutes.** Independently, the last **validated** body per
+  cache key is remembered under a `stale:`-prefixed key. When the
+  upstream subrequest is not HTTP 200 because of a transient failure
+  (connect/read timeout, HTTP 408/429/5xx, or capture status 0/502/504),
+  that body is served as HTTP 200 with `X-Cache-Status: STALE` instead
+  of 502. Coalesced waiters that find no fresh key after the lock try
+  the same stale key before another upstream attempt. Serving STALE
+  does **not** refresh the fresh 60 s key.
 - Cache key: `<upstream>:<path>?<query-string>` (e.g.
-  `coingecko:/api/v3/...`, `geckoterminal:/api/v2/...`).
+  `coingecko:/api/v3/...`, `geckoterminal:/api/v2/...`). The stale key
+  is `stale:` plus the same string (including the original client query
+  for the CoinGecko `usd`→`tether` alias).
 - Storage: `lua_shared_dict pricing_cache 50m` (in-memory, lost on
   restart, shared across upstreams).
+- `X-Cache-Status` values: `HIT` | `MISS` | `STALE`.
 
 ### Validation
 
@@ -183,8 +198,11 @@ A response is cached only when all of the following are true:
   quota-exhausted / bad-params shape)
 
 Any failed check → the consumer receives HTTP 502 with a JSON body
-describing the rejection, and the cache stays empty for that key so the
-next request triggers a fresh upstream call.
+describing the rejection. Neither the fresh nor the stale key is
+updated, so an invalid or error-envelope body is never remembered or
+served as `STALE`. Non-transient upstream 4xx (e.g. 400/401/403/404)
+also never trigger `STALE` — only the transient statuses listed under
+Cache TTL do.
 
 ### CoinGecko id alias
 
@@ -213,12 +231,16 @@ This is the one place the proxy is not fully transparent.
 
 ### What it never does
 
-- Serve a stale value when an upstream is down. There is no
-  `proxy_cache_use_stale`. If the upstream is unreachable or returns
-  garbage, the consumer gets HTTP 502 and decides for itself how to
-  react (pause minting, retry, alert).
-- Cache an upstream error envelope.
-- Hold a value longer than the configured 60 s TTL.
+- Cache an upstream error envelope (invalid JSON, top-level `error*` /
+  `status.error_message`, or any body that fails validation). Those
+  responses are never stored on the fresh or stale key and are never
+  served as `STALE`.
+- Serve `STALE` for non-transient upstream 4xx other than 408/429
+  (e.g. 400/401/403/404) — those stay HTTP 502.
+- Hold a **fresh** value longer than the configured 60 s TTL. The
+  15-minute window applies only to the last validated body, and only
+  when a transient upstream failure would otherwise produce 502. If no
+  stale body exists, the consumer still gets HTTP 502.
 
 ## Quota monitoring
 
@@ -363,7 +385,7 @@ docker run -d -p 8080:8080 -e COINGECKO_API_KEY=$YOUR_KEY pricing-proxy:dev
 |---|---|
 | `nginx.conf` | OpenResty top-level config: shared dicts, resolver with `ipv6=off`, env var pass-through, monitor bootstrap |
 | `pricing.conf` | Server block: public `/coingecko/`, `/geckoterminal/`, `/health`, `/quota` locations and their internal `/_internal/<upstream>/` and `/_internal/telegram_send` `proxy_pass` targets |
-| `proxy.lua` | Request handler: upstream config lookup → cache lookup → coalescing lock → subrequest → JSON validation → cache store |
+| `proxy.lua` | Request handler: upstream config lookup → fresh/stale cache lookup → coalescing lock → subrequest → JSON validation → fresh + stale cache store |
 | `monitor.lua` | Background quota monitor: timer → `/api/v3/key` probe → threshold check → Telegram alert |
 | `Dockerfile` | Bakes the configs and Lua files into the OpenResty base image |
 | `docker-compose.yaml` | Reference deployment using the published image |
@@ -375,7 +397,7 @@ docker run -d -p 8080:8080 -e COINGECKO_API_KEY=$YOUR_KEY pricing-proxy:dev
 |---|---|
 | Health | `curl http://localhost:8080/health` → `OK` |
 | Last quota snapshot | `curl http://localhost:8080/quota` → `{"last_pct":12.3}` (cached, not a live probe) |
-| Logs | `docker logs pricing-proxy` — every request is logged with `cache=HIT\|MISS` |
+| Logs | `docker logs pricing-proxy` — every request is logged with `cache=HIT\|MISS\|STALE` |
 | Rejected upstream responses | Look for `pricing-proxy reject <upstream> ...` warnings in the logs |
 | Non-JSON upstream body | A `pricing-proxy non-JSON body ... body[0..200]=...` warning includes a snippet so you can see what the upstream actually returned (HTML challenge, gzip, etc.) |
 | Quota monitor cycle | A `monitor: quota <plan> used=X/Y (Z%) remaining=…` NOTICE is logged every `CHECK_INTERVAL_S` (default 30 min) |
