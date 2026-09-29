@@ -411,12 +411,10 @@ if parsed_price then
     end
     local missing = price_pairs.missing(parsed_price, local_quote)
     local missing_detail = "simple/price quotes missing"
-    local after_detail = "simple/price quote missing after upstream"
     local encode_detail = "simple/price encode failed"
     local query = price_pairs.upstream_query
     if parsed_price.kind == "token" then
         missing_detail = "token_price quotes missing"
-        after_detail = "token_price quote missing after upstream"
         encode_detail = "token_price encode failed"
         query = price_pairs.upstream_contracts
     end
@@ -442,16 +440,16 @@ if parsed_price then
         remember_pair(quote.canonical, quote.vs, quote.value)
         known[quote.canonical .. "\0" .. quote.vs] = quote.value
     end
-    local assembled = price_pairs.assemble(parsed_price, local_quote)
-    if assembled == nil then
-        return unlock_and_fail(502, after_detail, res.status)
-    end
+    local assembled = price_pairs.assemble_available(parsed_price, local_quote)
     local body = cjson.encode(assembled)
     if type(body) ~= "string" then
         return unlock_and_fail(502, encode_detail, res.status)
     end
-    -- Stale copy only. A fresh whole-query entry would extend a copied quote.
-    remember("stale:" .. cache_key, body, STALE_TTL)
+    -- Stale copy only. A fresh whole-query entry would extend a copied quote, and an empty
+    -- result must not overwrite quotes retained for a bad upstream moment.
+    if next(assembled) ~= nil then
+        remember("stale:" .. cache_key, body, STALE_TTL)
+    end
     release_lock()
     send(200, "MISS", body)
     return
