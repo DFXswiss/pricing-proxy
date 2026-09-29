@@ -85,6 +85,13 @@ function M.parse(args)
     return { responses = responses }
 end
 
+function M.lock_key(parsed, cache_key)
+    if parsed then
+        return "coingecko:simple-price" -- pair fills share one lock so two query strings for the same quote cannot both miss.
+    end
+    return cache_key
+end
+
 function M.missing(parsed, lookup)
     local missing, seen = {}, {}
     for _, resp in ipairs(parsed.responses) do

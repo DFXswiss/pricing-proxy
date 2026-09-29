@@ -173,7 +173,7 @@ local function acquire_lock()
     if locked or not lock then
         return
     end
-    elapsed = lock:lock(cache_key)
+    elapsed = lock:lock(price_pairs.lock_key(parsed_price, cache_key))
     locked = elapsed ~= nil
 end
 

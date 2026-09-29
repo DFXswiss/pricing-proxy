@@ -96,4 +96,7 @@ eq(P.uses_stale(combined, function(canonical, vs)
     return lookup(canonical, vs)
 end), true, "missing fresh quote needs stale")
 
+eq(P.lock_key({ responses = {} }, "coingecko:/api/v3/simple/price?ids=tether&vs_currencies=eur"), "coingecko:simple-price", "pair fills share one lock")
+eq(P.lock_key(nil, "coingecko:/api/v3/simple/token_price/ethereum?contract_addresses=0xabc&vs_currencies=usd"), "coingecko:/api/v3/simple/token_price/ethereum?contract_addresses=0xabc&vs_currencies=usd", "non-pair lock is the cache key")
+
 print("ok")
