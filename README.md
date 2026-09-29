@@ -180,8 +180,15 @@ but not the only one.
   key.
 - Cache key: `<upstream>:<path>?<query-string>` (e.g.
   `coingecko:/api/v3/...`, `geckoterminal:/api/v2/...`). The stale key
-  is `stale:` plus the same string (including the original client query
-  for the CoinGecko `usd`→`tether` alias).
+  is `stale:` plus the same string.
+- **CoinGecko `/simple/price` quotes are shared.** When the query is only
+  `ids` and `vs_currencies`, each coin/currency number is also stored
+  under `coingecko:pair:<id>:<currency>` for the same 60 s. A later
+  request is a `HIT` when every quote it asks for is still fresh, even
+  if the currency list is a different shape (`eur,btc` reuses an `eur`
+  quote fetched on its own, and only the missing currencies go
+  upstream). Any other parameter keeps the single whole-query key.
+  The pair's stale key is `stale:` plus that pair key.
 - Storage: `lua_shared_dict pricing_cache 50m` (in-memory, lost on
   restart, shared across upstreams).
 - `X-Cache-Status` values: `HIT` | `MISS` | `STALE`.
@@ -227,11 +234,14 @@ cache a near-zero price. The proxy substitutes USDT instead:
 - If the upstream body has no `tether` object after the alias rewrite,
   the proxy returns 502 and does not cache (so HITs never serve a body
   without `usd`).
-- The cache key is the **original** client query string (`ids=usd…`), so
-  identical follow-up requests HIT the already-aliased body.
+- The whole-query cache key stays the **original** client query string
+  (`ids=usd…`). The shared per-quote key uses the canonical id
+  (`tether`), so an `ids=usd` quote and an `ids=tether` quote are the
+  same cached number. The JSON key in the response is still `usd` when
+  that is what the client asked for.
 - Other CoinGecko paths and all of GeckoTerminal are untouched.
 
-This is the one place the proxy is not fully transparent.
+The id rewrite is not transparent. Shared per-quote caching, described above, is the other deliberate difference from a plain pass-through.
 
 ### What it never does
 
