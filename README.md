@@ -180,8 +180,56 @@ but not the only one.
   key.
 - Cache key: `<upstream>:<path>?<query-string>` (e.g.
   `coingecko:/api/v3/...`, `geckoterminal:/api/v2/...`). The stale key
-  is `stale:` plus the same string (including the original client query
-  for the CoinGecko `usd`→`tether` alias).
+  is `stale:` plus the same string.
+- **CoinGecko `/simple/price` quotes are shared.** When the query is only
+  `ids` and `vs_currencies`, each coin/currency number is also stored
+  under `coingecko:pair:<id>:<currency>` for the same 60 s. A later
+  request is a `HIT` when every quote it asks for is still fresh, even
+  if the currency list is a different shape (`eur,btc` reuses an `eur`
+  quote fetched on its own). Otherwise one upstream call asks for the
+  cross product of the missing ids and the missing currencies, both
+  sorted. Only numbers this request asked for, and did not already have
+  fresh, are stored. A number that was fresh at the start of that fill
+  stays in the response even if its 60 s entry expires while the
+  upstream call runs. The fill does not read it from the cache again
+  after the call, so a valid upstream 200 does not become a 502. On a
+  transient upstream failure those copied numbers stay in the body, a
+  number this request did not already have may come from its stale
+  entry, and that body is `STALE`. The composed body is not stored as a
+  fresh whole-query hit, so a copied number is not served as fresh past
+  its own 60 s. A repeat of the same query is a HIT only when every
+  quote is still fresh on its own. The 15-minute stale copy of that
+  body remains, and only for a transient upstream failure. All such
+  fills share one lock, `coingecko:simple-price`, and wait at most 5 s.
+  Any other parameter, or a query the argument decoder truncates, keeps
+  the single whole-query key. The pair's stale key is `stale:` plus
+  that pair key.
+- **CoinGecko `/simple/token_price/<platform>` quotes are shared.** When
+  the query is only `contract_addresses` and `vs_currencies`, each
+  platform/address/currency number is also stored under
+  `coingecko:token:<platform>:<address>:<currency>` for the same 60 s.
+  A later request is a `HIT` when every quote it asks for is still
+  fresh, even if the address list is a different shape (one address
+  reuses a number fetched as part of a list). Otherwise one upstream
+  call asks for the cross product of the missing addresses and the
+  missing currencies, both sorted. Only numbers this request asked for,
+  and did not already have fresh, are stored. A number that was fresh
+  at the start of that fill stays in the response even if its 60 s
+  entry expires while the upstream call runs. The fill does not read
+  it from the cache again after the call, so a valid upstream 200 does
+  not become a 502. On a transient upstream failure those copied
+  numbers stay in the body, a number this request did not already have
+  may come from its stale entry, and that body is `STALE`. The composed
+  body is not stored as a fresh whole-query hit, so a copied number is
+  not served as fresh past its own 60 s. A repeat of the same query is
+  a HIT only when every quote is still fresh on its own. The JSON key
+  is the lowercased address. There is no `usd`→`tether` rewrite on this
+  path. The 15-minute stale copy of that body remains, and only for a
+  transient upstream failure. All such fills share one lock,
+  `coingecko:token-price`, and wait at most 5 s. Any other parameter,
+  an empty address slot, or a query the argument decoder truncates,
+  keeps the single whole-query key. The quote's stale key is `stale:`
+  plus that quote key.
 - Storage: `lua_shared_dict pricing_cache 50m` (in-memory, lost on
   restart, shared across upstreams).
 - `X-Cache-Status` values: `HIT` | `MISS` | `STALE`.
@@ -227,11 +275,14 @@ cache a near-zero price. The proxy substitutes USDT instead:
 - If the upstream body has no `tether` object after the alias rewrite,
   the proxy returns 502 and does not cache (so HITs never serve a body
   without `usd`).
-- The cache key is the **original** client query string (`ids=usd…`), so
-  identical follow-up requests HIT the already-aliased body.
+- The whole-query cache key stays the **original** client query string
+  (`ids=usd…`). The shared per-quote key uses the canonical id
+  (`tether`), so an `ids=usd` quote and an `ids=tether` quote are the
+  same cached number. The JSON key in the response is still `usd` when
+  that is what the client asked for.
 - Other CoinGecko paths and all of GeckoTerminal are untouched.
 
-This is the one place the proxy is not fully transparent.
+The id rewrite is not transparent. Shared per-quote caching, described above, is the other deliberate difference from a plain pass-through.
 
 ### What it never does
 
@@ -389,7 +440,9 @@ docker run -d -p 8080:8080 -e COINGECKO_API_KEY=$YOUR_KEY pricing-proxy:dev
 |---|---|
 | `nginx.conf` | OpenResty top-level config: shared dicts, resolver with `ipv6=off`, env var pass-through, monitor bootstrap |
 | `pricing.conf` | Server block: public `/coingecko/`, `/geckoterminal/`, `/health`, `/quota` locations and their internal `/_internal/<upstream>/` and `/_internal/telegram_send` `proxy_pass` targets |
-| `proxy.lua` | Request handler: upstream config lookup → fresh cache lookup → coalescing lock → subrequest → (transient → stale) → JSON validation → fresh + stale cache store |
+| `proxy.lua` | Request handler: upstream lookup → fresh cache → lock → subrequest → (transient → stale) → JSON check. Shared `simple/price` and `token_price` quotes are stored per number. The composed body of those fills is stored only as a stale copy |
+| `price_pairs.lua` | Splits those two CoinGecko queries into one cacheable number per coin or address and currency |
+| `price_pairs_test.lua` | Plain Lua checks for that split. Not part of the image |
 | `monitor.lua` | Background quota monitor: timer → `/api/v3/key` probe → threshold check → Telegram alert |
 | `Dockerfile` | Bakes the configs and Lua files into the OpenResty base image |
 | `docker-compose.yaml` | Reference deployment using the published image |
