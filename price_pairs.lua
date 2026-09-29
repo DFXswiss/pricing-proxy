@@ -249,6 +249,26 @@ function M.assemble(parsed, lookup)
     return out
 end
 
+-- This drops pairs the lookup cannot serve because upstream omits entries without a price,
+-- and rejecting the whole list would discard quotes that did arrive. M.assemble must stay
+-- strict: nil tells callers to go upstream and tells the stale path it cannot cover the request.
+function M.assemble_available(parsed, lookup)
+    local out = {}
+    for _, resp in ipairs(parsed.responses) do
+        local quotes = {}
+        for _, vs in ipairs(resp.vs) do
+            local value = lookup(resp.canonical, vs)
+            if type(value) == "number" then
+                quotes[vs] = value
+            end
+        end
+        if next(quotes) ~= nil then
+            out[resp.key] = quotes
+        end
+    end
+    return out
+end
+
 function M.uses_stale(parsed, fresh_lookup)
     for _, resp in ipairs(parsed.responses) do
         for _, vs in ipairs(resp.vs) do

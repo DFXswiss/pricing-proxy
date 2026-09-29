@@ -42,12 +42,19 @@ store["tether:eur"] = 0.92
 eq(#P.missing(combined, lookup), 1, "eur is already known")
 eq(P.missing(combined, lookup)[1].vs, "btc", "only btc is fetched")
 eq(P.assemble(eur_only, lookup).tether.eur, 0.92, "single eur reuses the shared quote")
-eq(P.assemble(combined, lookup), nil, "btc still missing")
+local body = P.assemble_available(combined, lookup)
+has_quote(body, "tether", "eur", 0.92, "available ids quote")
+eq(body.tether.btc, nil, "missing ids currency omitted")
+eq(P.assemble(combined, lookup), nil, "strict assembly still rejects one missing pair")
 
 store["tether:btc"] = 0.00001
-local body = P.assemble(combined, lookup)
+local strict_body = P.assemble(combined, lookup)
+local available_body = P.assemble_available(combined, lookup)
+body = strict_body
 has_quote(body, "tether", "eur", 0.92, "combined")
 has_quote(body, "tether", "btc", 0.00001, "combined")
+eq(available_body.tether.eur, strict_body.tether.eur, "complete available eur matches strict")
+eq(available_body.tether.btc, strict_body.tether.btc, "complete available btc matches strict")
 eq(P.uses_stale(combined, lookup), false, "both fresh")
 
 -- ids=usd is the tether quote, answered under the key the client used.
@@ -103,6 +110,7 @@ eq(P.lock_key(nil, "coingecko:/api/v3/simple/token_price/ethereum?contract_addre
 reset()
 local addr_a = "0xdac17f958d2ee523a2206206994597c13d831ec7"
 local addr_b = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+local addr_c = "0x6b175474e89094c44da98b954eedeac495271d0f"
 local token_list = P.parse_token("ethereum", {
     contract_addresses = addr_a .. "," .. addr_b,
     vs_currencies = "eur,btc",
@@ -128,6 +136,34 @@ eq(#P.missing(token_list, lookup), 3, "addr_a/eur is already known")
 eq(P.assemble(token_one, lookup)[addr_a].eur, 0.92, "mixed-case address reuses the shared quote")
 eq(P.assemble(token_list, lookup), nil, "other token quotes still missing")
 eq(P.lock_key(token_list, "coingecko:/api/v3/simple/token_price/ethereum?contract_addresses=" .. addr_a), "coingecko:token-price", "token fills share one lock")
+
+local available_tokens = P.parse_token("ethereum", {
+    contract_addresses = addr_a .. "," .. addr_b .. "," .. addr_c,
+    vs_currencies = "usd",
+})
+reset()
+store[addr_a .. ":usd"] = 1.01
+store[addr_b .. ":usd"] = 2.02
+body = P.assemble_available(available_tokens, lookup)
+has_quote(body, addr_a, "usd", 1.01, "available token")
+has_quote(body, addr_b, "usd", 2.02, "available token")
+eq(body[addr_c], nil, "token with no resolved currencies omitted")
+eq(P.assemble(available_tokens, lookup), nil, "strict token assembly still rejects a missing pair")
+
+local multi_vs_available_tokens = P.parse_token("ethereum", {
+    contract_addresses = addr_a .. "," .. addr_c,
+    vs_currencies = "usd,eur",
+})
+reset()
+store[addr_a .. ":usd"] = 1.01
+body = P.assemble_available(multi_vs_available_tokens, lookup)
+has_quote(body, addr_a, "usd", 1.01, "multi-currency available token")
+eq(body[addr_c], nil, "token with no resolved currencies across multiple currencies omitted")
+
+reset()
+body = P.assemble_available(available_tokens, lookup)
+eq(type(body), "table", "empty available assembly is a table")
+eq(next(body), nil, "empty available assembly has no response keys")
 
 eq(P.parse_token("ethereum", {
     contract_addresses = "0xabc",
