@@ -390,8 +390,15 @@ if parsed_price then
         after_detail = "token_price quote missing after upstream"
         query = price_pairs.upstream_contracts
     end
+    -- The fresh check above can lose to another worker when this request
+    -- does not hold the lock. The numbers are already in `known`. Serving
+    -- them is a hit. A 502 here would reject a list that is fresh.
     if #missing == 0 then
-        return unlock_and_fail(502, missing_detail, nil)
+        local assembled = price_pairs.assemble(parsed_price, local_quote)
+        if assembled == nil or not send_assembled(assembled, "HIT", nil) then
+            return unlock_and_fail(502, missing_detail, nil)
+        end
+        return
     end
     local res = capture(query(missing))
     if res.status ~= 200 then

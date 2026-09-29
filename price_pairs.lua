@@ -87,24 +87,36 @@ function M.parse(args)
     return { responses = responses }
 end
 
--- Addresses must be 20-byte hex. One bad address keeps the old path.
+-- Addresses must be 20-byte hex. One bad address, or an empty slot,
+-- keeps the old path. A trailing comma is an empty slot.
 local function contract_addresses(raw)
     if type(raw) ~= "string" or raw == "" then
         return nil
     end
     local out, seen = {}, {}
-    for token in raw:gmatch("[^,]+") do
+    local i = 1
+    while i <= #raw + 1 do
+        local comma = raw:find(",", i, true)
+        local token
+        if comma then
+            token = raw:sub(i, comma - 1)
+            i = comma + 1
+        else
+            token = raw:sub(i)
+            i = #raw + 2
+        end
         local t = token:match("^%s*(.-)%s*$")
-        if t and t ~= "" then
-            local lower = string.lower(t)
-            -- Lua patterns have no counted repetition. 0x plus 40 hex digits is 42 characters.
-            if #lower ~= 42 or not lower:match("^0x[0-9a-f]+$") then
-                return nil
-            end
-            if not seen[lower] then
-                seen[lower] = true
-                out[#out + 1] = lower
-            end
+        if not t or t == "" then
+            return nil
+        end
+        local lower = string.lower(t)
+        -- Lua patterns have no counted repetition. 0x plus 40 hex digits is 42 characters.
+        if #lower ~= 42 or not lower:match("^0x[0-9a-f]+$") then
+            return nil
+        end
+        if not seen[lower] then
+            seen[lower] = true
+            out[#out + 1] = lower
         end
     end
     if #out == 0 then

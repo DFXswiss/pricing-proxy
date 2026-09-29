@@ -147,5 +147,26 @@ eq(P.parse_token("eth/ereum", {
     vs_currencies = "usd",
 }), nil, "unsafe platform")
 eq(P.parse_token("ethereum", { contract_addresses = addr_a }), nil, "token vs required")
+eq(P.parse_token("ethereum", {
+    contract_addresses = addr_a .. ",",
+    vs_currencies = "usd",
+}), nil, "trailing comma is an empty slot")
+eq(P.parse_token("ethereum", {
+    contract_addresses = "," .. addr_a,
+    vs_currencies = "usd",
+}), nil, "leading comma is an empty slot")
+eq(P.parse_token("ethereum", {
+    contract_addresses = addr_a .. ",," .. addr_b,
+    vs_currencies = "usd",
+}), nil, "double comma is an empty slot")
+eq(P.parse_token("ethereum", {
+    contract_addresses = addr_a .. ", ," .. addr_b,
+    vs_currencies = "usd",
+}), nil, "blank slot is empty")
+local token_twice = P.parse_token("ethereum", {
+    contract_addresses = addr_a .. "," .. string.upper(addr_a),
+    vs_currencies = "usd",
+})
+eq(token_twice and #token_twice.responses or 0, 1, "same address twice is one quote")
 
 print("ok")
