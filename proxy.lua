@@ -326,10 +326,16 @@ if try_serve_fresh_pairs() then
     return
 end
 
-local cached = cache:get(cache_key)
-if cached then
-    send(200, "HIT", cached)
-    return
+-- A composed simple/price body must not be a fresh hit. It can contain
+-- a quote copied from an older pair entry, and a new 60s TTL on the
+-- whole query would serve that number after its own entry expired.
+-- Pair hits go through try_serve_fresh_pairs only.
+if not parsed_price then
+    local cached = cache:get(cache_key)
+    if cached then
+        send(200, "HIT", cached)
+        return
+    end
 end
 
 acquire_lock()
@@ -338,8 +344,8 @@ if try_serve_fresh_pairs() then
     return
 end
 
-if elapsed and elapsed > 0 then
-    cached = cache:get(cache_key)
+if not parsed_price and elapsed and elapsed > 0 then
+    local cached = cache:get(cache_key)
     if cached then
         release_lock()
         send(200, "HIT", cached)
@@ -385,7 +391,8 @@ if parsed_price then
     if type(body) ~= "string" then
         return unlock_and_fail(502, "simple/price encode failed", res.status)
     end
-    remember_body(body)
+    -- Stale copy only. A fresh whole-query entry would extend a copied quote.
+    remember("stale:" .. cache_key, body, STALE_TTL)
     release_lock()
     send(200, "MISS", body)
     return

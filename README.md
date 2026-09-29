@@ -192,10 +192,15 @@ but not the only one.
   fresh, are stored. A number that was fresh at the start of that fill
   stays in the response even if its 60 s entry expires while the
   upstream call runs. The fill does not read it from the cache again
-  after the call, so a valid upstream 200 does not become a 502. All
-  such fills share one lock, `coingecko:simple-price`, and wait at most
-  5 s. Any other parameter keeps the single whole-query key. The pair's
-  stale key is `stale:` plus that pair key.
+  after the call, so a valid upstream 200 does not become a 502. The
+  composed body is not stored as a fresh whole-query hit, so a copied
+  number is not served as fresh past its own 60 s. A repeat of the same
+  query is a HIT only when every quote is still fresh on its own. The
+  15-minute stale copy of that body remains, and only for a transient
+  upstream failure. All such fills share one lock,
+  `coingecko:simple-price`, and wait at most 5 s. Any other parameter
+  keeps the single whole-query key. The pair's stale key is `stale:`
+  plus that pair key.
 - Storage: `lua_shared_dict pricing_cache 50m` (in-memory, lost on
   restart, shared across upstreams).
 - `X-Cache-Status` values: `HIT` | `MISS` | `STALE`.
