@@ -192,15 +192,18 @@ but not the only one.
   fresh, are stored. A number that was fresh at the start of that fill
   stays in the response even if its 60 s entry expires while the
   upstream call runs. The fill does not read it from the cache again
-  after the call, so a valid upstream 200 does not become a 502. The
-  composed body is not stored as a fresh whole-query hit, so a copied
-  number is not served as fresh past its own 60 s. A repeat of the same
-  query is a HIT only when every quote is still fresh on its own. The
-  15-minute stale copy of that body remains, and only for a transient
-  upstream failure. All such fills share one lock,
-  `coingecko:simple-price`, and wait at most 5 s. Any other parameter
-  keeps the single whole-query key. The pair's stale key is `stale:`
-  plus that pair key.
+  after the call, so a valid upstream 200 does not become a 502. On a
+  transient upstream failure those copied numbers stay in the body, a
+  number this request did not already have may come from its stale
+  entry, and that body is `STALE`. The composed body is not stored as a
+  fresh whole-query hit, so a copied number is not served as fresh past
+  its own 60 s. A repeat of the same query is a HIT only when every
+  quote is still fresh on its own. The 15-minute stale copy of that
+  body remains, and only for a transient upstream failure. All such
+  fills share one lock, `coingecko:simple-price`, and wait at most 5 s.
+  Any other parameter, or a query the argument decoder truncates, keeps
+  the single whole-query key. The pair's stale key is `stale:` plus
+  that pair key.
 - **CoinGecko `/simple/token_price/<platform>` quotes are shared.** When
   the query is only `contract_addresses` and `vs_currencies`, each
   platform/address/currency number is also stored under
@@ -214,15 +217,19 @@ but not the only one.
   at the start of that fill stays in the response even if its 60 s
   entry expires while the upstream call runs. The fill does not read
   it from the cache again after the call, so a valid upstream 200 does
-  not become a 502. The composed body is not stored as a fresh
-  whole-query hit, so a copied number is not served as fresh past its
-  own 60 s. A repeat of the same query is a HIT only when every quote
-  is still fresh on its own. The JSON key is the lowercased address.
-  There is no `usd`→`tether` rewrite on this path. The 15-minute stale
-  copy of that body remains, and only for a transient upstream failure.
-  All such fills share one lock, `coingecko:token-price`, and wait at
-  most 5 s. Any other parameter keeps the single whole-query key. The
-  quote's stale key is `stale:` plus that quote key.
+  not become a 502. On a transient upstream failure those copied
+  numbers stay in the body, a number this request did not already have
+  may come from its stale entry, and that body is `STALE`. The composed
+  body is not stored as a fresh whole-query hit, so a copied number is
+  not served as fresh past its own 60 s. A repeat of the same query is
+  a HIT only when every quote is still fresh on its own. The JSON key
+  is the lowercased address. There is no `usd`→`tether` rewrite on this
+  path. The 15-minute stale copy of that body remains, and only for a
+  transient upstream failure. All such fills share one lock,
+  `coingecko:token-price`, and wait at most 5 s. Any other parameter,
+  an empty address slot, or a query the argument decoder truncates,
+  keeps the single whole-query key. The quote's stale key is `stale:`
+  plus that quote key.
 - Storage: `lua_shared_dict pricing_cache 50m` (in-memory, lost on
   restart, shared across upstreams).
 - `X-Cache-Status` values: `HIT` | `MISS` | `STALE`.

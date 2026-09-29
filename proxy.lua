@@ -58,12 +58,23 @@ local upstream_path = ngx.re.sub(ngx.var.uri, upstream_cfg.path_prefix, "/", "jo
 local args = ngx.var.args or ""
 local cache_key = upstream_name .. ":" .. upstream_path .. "?" .. args
 
+-- ngx.decode_args stops at its argument cap and reports "truncated".
+-- A query we did not see in full may hide an extra parameter, so it
+-- stays on the raw query-string cache.
+local function decode_query(raw)
+    local decoded, err = ngx.decode_args(raw)
+    if err then
+        return nil
+    end
+    return decoded
+end
+
 local parsed_price = nil
 if upstream_name == "coingecko"
     and upstream_path == "/api/v3/simple/price"
     and args ~= ""
 then
-    parsed_price = price_pairs.parse(ngx.decode_args(args))
+    parsed_price = price_pairs.parse(decode_query(args))
 end
 if not parsed_price
     and upstream_name == "coingecko"
@@ -71,7 +82,7 @@ if not parsed_price
 then
     local platform = upstream_path:match("^/api/v3/simple/token_price/([%w_%-]+)$")
     if platform then
-        parsed_price = price_pairs.parse_token(platform, ngx.decode_args(args))
+        parsed_price = price_pairs.parse_token(platform, decode_query(args))
     end
 end
 
@@ -88,7 +99,7 @@ if not parsed_price
     and upstream_path == "/api/v3/simple/price"
     and args ~= ""
 then
-    local decoded = ngx.decode_args(args)
+    local decoded = decode_query(args)
     local ids_raw = decoded and decoded.ids
     if type(ids_raw) == "table" then
         ids_raw = table.concat(ids_raw, ",")
@@ -279,15 +290,25 @@ local function try_serve_fresh_pairs()
     return send_assembled(assembled, "HIT", nil)
 end
 
+-- Set only for the duration of one pair or token fill. It prefers the
+-- numbers copied before the upstream call, then a stale entry for a
+-- number this request did not already have. It must not re-read a fresh
+-- key: that key can expire while the call runs.
+local fill_lookup = nil
+
 local function try_serve_pair_stale(upstream_status)
     if not parsed_price then
         return false
     end
-    local assembled = price_pairs.assemble(parsed_price, any_quote)
+    local lookup = fill_lookup or any_quote
+    local assembled = price_pairs.assemble(parsed_price, lookup)
     if assembled == nil then
         return false
     end
-    local status = price_pairs.uses_stale(parsed_price, fresh_quote) and "STALE" or "HIT"
+    local status = "STALE"
+    if not fill_lookup then
+        status = price_pairs.uses_stale(parsed_price, fresh_quote) and "STALE" or "HIT"
+    end
     return send_assembled(assembled, status, upstream_status)
 end
 
@@ -380,6 +401,13 @@ if parsed_price then
                 known[resp.canonical .. "\0" .. vs] = fresh
             end
         end
+    end
+    fill_lookup = function(canonical, vs)
+        local copied = known[canonical .. "\0" .. vs]
+        if type(copied) == "number" then
+            return copied
+        end
+        return read_quote("stale:" .. pair_fresh_key(canonical, vs))
     end
     local missing = price_pairs.missing(parsed_price, local_quote)
     local missing_detail = "simple/price quotes missing"
