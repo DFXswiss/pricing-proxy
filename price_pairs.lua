@@ -1,7 +1,9 @@
 -- Split CoinGecko /simple/price into one cacheable quote per coin and
--- currency. Callers that ask for different currency combinations then
--- share the quotes they have in common. The `usd` coin id is not the US
--- dollar; it is stored under `tether` and still answered as `usd`.
+-- currency, and /simple/token_price/<platform> into one quote per
+-- contract address and currency. Callers that ask for different lists
+-- then share the quotes they have in common. The `usd` coin id is not
+-- the US dollar; it is stored under `tether` and still answered as
+-- `usd`. Token addresses are not rewritten.
 
 local M = {}
 
@@ -85,8 +87,75 @@ function M.parse(args)
     return { responses = responses }
 end
 
+-- Addresses must be 20-byte hex. One bad address keeps the old path.
+local function contract_addresses(raw)
+    if type(raw) ~= "string" or raw == "" then
+        return nil
+    end
+    local out, seen = {}, {}
+    for token in raw:gmatch("[^,]+") do
+        local t = token:match("^%s*(.-)%s*$")
+        if t and t ~= "" then
+            local lower = string.lower(t)
+            -- Lua patterns have no counted repetition. 0x plus 40 hex digits is 42 characters.
+            if #lower ~= 42 or not lower:match("^0x[0-9a-f]+$") then
+                return nil
+            end
+            if not seen[lower] then
+                seen[lower] = true
+                out[#out + 1] = lower
+            end
+        end
+    end
+    if #out == 0 then
+        return nil
+    end
+    return out
+end
+
+-- nil means "do not share quotes": bad platform, missing
+-- contract_addresses/vs, or any other parameter.
+function M.parse_token(platform, args)
+    if type(platform) ~= "string" or not platform:match("^[%w_%-]+$") then
+        return nil
+    end
+    if type(args) ~= "table" then
+        return nil
+    end
+    for key in pairs(args) do
+        if key ~= "contract_addresses" and key ~= "vs_currencies" then
+            return nil
+        end
+    end
+    local addresses = contract_addresses(as_string(args.contract_addresses))
+    local vs = tokens(as_string(args.vs_currencies))
+    if not addresses or not vs then
+        return nil
+    end
+
+    local responses, seen_key = {}, {}
+    for _, address in ipairs(addresses) do
+        if not seen_key[address] then
+            seen_key[address] = true
+            responses[#responses + 1] = {
+                key = address,
+                canonical = address,
+                vs = vs,
+            }
+        end
+    end
+    return {
+        kind = "token",
+        platform = string.lower(platform),
+        responses = responses,
+    }
+end
+
 function M.lock_key(parsed, cache_key)
     if parsed then
+        if parsed.kind == "token" then
+            return "coingecko:token-price"
+        end
         return "coingecko:simple-price" -- pair fills share one lock so two query strings for the same quote cannot both miss.
     end
     return cache_key
@@ -106,7 +175,7 @@ function M.missing(parsed, lookup)
     return missing
 end
 
-function M.upstream_query(missing)
+local function missing_query(missing, id_name)
     local ids, vs = {}, {}
     local seen_id, seen_vs = {}, {}
     for _, pair in ipairs(missing) do
@@ -121,7 +190,15 @@ function M.upstream_query(missing)
     end
     table.sort(ids)
     table.sort(vs)
-    return "ids=" .. table.concat(ids, ",") .. "&vs_currencies=" .. table.concat(vs, ",")
+    return id_name .. "=" .. table.concat(ids, ",") .. "&vs_currencies=" .. table.concat(vs, ",")
+end
+
+function M.upstream_query(missing)
+    return missing_query(missing, "ids")
+end
+
+function M.upstream_contracts(missing)
+    return missing_query(missing, "contract_addresses")
 end
 
 function M.numeric_quotes(data, missing)

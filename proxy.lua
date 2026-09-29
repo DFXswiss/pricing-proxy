@@ -9,8 +9,10 @@
 -- a valid price.
 --
 -- CoinGecko /simple/price queries that are only `ids` and `vs_currencies`
--- are also stored per coin and currency. A later request reuses those
--- quotes even when the rest of the query string differs.
+-- are also stored per coin and currency. /simple/token_price/<platform>
+-- queries that are only `contract_addresses` and `vs_currencies` are
+-- stored per platform, address, and currency. A later request reuses
+-- those quotes even when the rest of the query string differs.
 
 local CACHE_TTL = 60
 local STALE_TTL = 900  -- 15 minutes
@@ -62,6 +64,15 @@ if upstream_name == "coingecko"
     and args ~= ""
 then
     parsed_price = price_pairs.parse(ngx.decode_args(args))
+end
+if not parsed_price
+    and upstream_name == "coingecko"
+    and args ~= ""
+then
+    local platform = upstream_path:match("^/api/v3/simple/token_price/([%w_%-]+)$")
+    if platform then
+        parsed_price = price_pairs.parse_token(platform, ngx.decode_args(args))
+    end
 end
 
 -- CoinGecko's `usd` coin id is not the US dollar; consumers treating it as FX
@@ -126,6 +137,9 @@ local function is_transient_upstream(status)
 end
 
 local function pair_fresh_key(canonical, vs)
+    if parsed_price and parsed_price.kind == "token" then
+        return "coingecko:token:" .. parsed_price.platform .. ":" .. canonical .. ":" .. vs
+    end
     return "coingecko:pair:" .. canonical .. ":" .. vs
 end
 
@@ -326,8 +340,8 @@ if try_serve_fresh_pairs() then
     return
 end
 
--- A composed simple/price body must not be a fresh hit. It can contain
--- a quote copied from an older pair entry, and a new 60s TTL on the
+-- A composed pair or token_price body must not be a fresh hit. It can
+-- contain a quote copied from an older entry, and a new 60s TTL on the
 -- whole query would serve that number after its own entry expired.
 -- Pair hits go through try_serve_fresh_pairs only.
 if not parsed_price then
@@ -368,10 +382,18 @@ if parsed_price then
         end
     end
     local missing = price_pairs.missing(parsed_price, local_quote)
-    if #missing == 0 then
-        return unlock_and_fail(502, "simple/price quotes missing", nil)
+    local missing_detail = "simple/price quotes missing"
+    local after_detail = "simple/price quote missing after upstream"
+    local query = price_pairs.upstream_query
+    if parsed_price.kind == "token" then
+        missing_detail = "token_price quotes missing"
+        after_detail = "token_price quote missing after upstream"
+        query = price_pairs.upstream_contracts
     end
-    local res = capture(price_pairs.upstream_query(missing))
+    if #missing == 0 then
+        return unlock_and_fail(502, missing_detail, nil)
+    end
+    local res = capture(query(missing))
     if res.status ~= 200 then
         return fail_or_stale(res, "upstream HTTP " .. tostring(res.status))
     end
@@ -385,7 +407,7 @@ if parsed_price then
     end
     local assembled = price_pairs.assemble(parsed_price, local_quote)
     if assembled == nil then
-        return unlock_and_fail(502, "simple/price quote missing after upstream", res.status)
+        return unlock_and_fail(502, after_detail, res.status)
     end
     local body = cjson.encode(assembled)
     if type(body) ~= "string" then
