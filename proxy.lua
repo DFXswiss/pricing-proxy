@@ -348,18 +348,7 @@ if elapsed and elapsed > 0 then
 end
 
 if parsed_price then
-    local missing = price_pairs.missing(parsed_price, fresh_quote)
-    if #missing == 0 then
-        return unlock_and_fail(502, "simple/price quotes missing", nil)
-    end
-    local res = capture(price_pairs.upstream_query(missing))
-    if res.status ~= 200 then
-        return fail_or_stale(res, "upstream HTTP " .. tostring(res.status))
-    end
-    local data, detail = decode_upstream(res)
-    if detail then
-        return fail_or_stale(res, detail)
-    end
+    -- Copy fresh numbers before the upstream call. The 60s entry can expire while it runs.
     local known = {}
     local function local_quote(canonical, vs)
         return known[canonical .. "\0" .. vs]
@@ -371,6 +360,18 @@ if parsed_price then
                 known[resp.canonical .. "\0" .. vs] = fresh
             end
         end
+    end
+    local missing = price_pairs.missing(parsed_price, local_quote)
+    if #missing == 0 then
+        return unlock_and_fail(502, "simple/price quotes missing", nil)
+    end
+    local res = capture(price_pairs.upstream_query(missing))
+    if res.status ~= 200 then
+        return fail_or_stale(res, "upstream HTTP " .. tostring(res.status))
+    end
+    local data, detail = decode_upstream(res)
+    if detail then
+        return fail_or_stale(res, detail)
     end
     for _, quote in ipairs(price_pairs.numeric_quotes(data, missing)) do
         remember_pair(quote.canonical, quote.vs, quote.value)
