@@ -440,7 +440,9 @@ docker run -d -p 8080:8080 -e COINGECKO_API_KEY=$YOUR_KEY pricing-proxy:dev
 |---|---|
 | `nginx.conf` | OpenResty top-level config: shared dicts, resolver with `ipv6=off`, env var pass-through, monitor bootstrap |
 | `pricing.conf` | Server block: public `/coingecko/`, `/geckoterminal/`, `/health`, `/quota` locations and their internal `/_internal/<upstream>/` and `/_internal/telegram_send` `proxy_pass` targets |
-| `proxy.lua` | Request handler: upstream config lookup → fresh cache lookup → coalescing lock → subrequest → (transient → stale) → JSON validation → fresh + stale cache store |
+| `proxy.lua` | Request handler: upstream lookup → fresh cache → lock → subrequest → (transient → stale) → JSON check. Shared `simple/price` and `token_price` quotes are stored per number. The composed body of those fills is stored only as a stale copy |
+| `price_pairs.lua` | Splits those two CoinGecko queries into one cacheable number per coin or address and currency |
+| `price_pairs_test.lua` | Plain Lua checks for that split. Not part of the image |
 | `monitor.lua` | Background quota monitor: timer → `/api/v3/key` probe → threshold check → Telegram alert |
 | `Dockerfile` | Bakes the configs and Lua files into the OpenResty base image |
 | `docker-compose.yaml` | Reference deployment using the published image |
